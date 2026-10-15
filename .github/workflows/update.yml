@@ -1,62 +1,130 @@
-name: Update from upstream release
+name: Update ceru-music-bin from upstream
 
 on:
   schedule:
-    - cron: '0 0 * * *' # daily at UTC 00:00
+    - cron: '0 0 * * *' # daily at 00:00 UTC
   workflow_dispatch:
+
+# Avoid two runs racing on the AUR repo
+concurrency:
+  group: aur-update
+  cancel-in-progress: false
 
 permissions:
   contents: write
+
+env:
+  UPSTREAM: timeshiftsauce/CeruMusic
+  AUR_PKG: ceru-music-bin
+  AUR_BRANCH: master
 
 jobs:
   update:
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel
-
     steps:
       - name: Install dependencies
-        run: |
-          pacman -Syu --noconfirm --needed git curl jq
+        run: pacman -Syu --noconfirm --needed git curl jq openssh sudo pacman-contrib
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get upstream latest version
+      - name: Fetch upstream latest version
         id: upstream
         run: |
-          UPSTREAM="timeshiftsauce/CeruMusic"
-          TAG=$(curl -s "https://api.github.com/repos/${UPSTREAM}/releases/latest" | jq -r '.tag_name')
-          if [ "$TAG" = "null" ] || [ -z "$TAG" ]; then
-            echo "Failed to fetch latest tag"
+          TAG=$(curl -fsSL "https://api.github.com/repos/${UPSTREAM}/releases/latest" | jq -r '.tag_name // empty')
+          if [ -z "$TAG" ]; then
+            echo "::error::Could not determine latest upstream tag"
             exit 1
           fi
-          VER=$(echo "$TAG" | sed 's/^v//')
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "version=$VER" >> $GITHUB_OUTPUT
+          VER="${TAG#v}"
+          echo "tag=$TAG"        >> "$GITHUB_OUTPUT"
+          echo "version=$VER"    >> "$GITHUB_OUTPUT"
+          echo "Upstream latest: $TAG (pkgver $VER)"
 
-      - name: Get current pkgver
+      - name: Read current pkgver
         id: current
         run: |
-          CUR=$(grep -E '^pkgver=' PKGBUILD | cut -d= -f2)
-          echo "version=$CUR" >> $GITHUB_OUTPUT
+          CUR=$(grep -E '^pkgver=' PKGBUILD | head -n1 | cut -d= -f2)
+          echo "version=$CUR" >> "$GITHUB_OUTPUT"
+          echo "Current pkgver: $CUR"
 
-      - name: Update if newer version available
+      - name: Update PKGBUILD and checksums
+        if: steps.upstream.outputs.version != steps.current.outputs.version
+        env:
+          NEW: ${{ steps.upstream.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Tools must not run as root; use an unprivileged builder.
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+
+          # Prepare an isolated, builder-owned working copy.
+          rm -rf /tmp/pkg
+          install -d -o builder -g builder /tmp/pkg
+          cp PKGBUILD /tmp/pkg/PKGBUILD
+          chown builder:builder /tmp/pkg/PKGBUILD
+
+          # Bump version, reset pkgrel.
+          sed -i "s/^pkgver=.*/pkgver=${NEW}/" /tmp/pkg/PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/"     /tmp/pkg/PKGBUILD
+
+          # Recompute checksums (downloads the new upstream artifacts).
+          ( cd /tmp/pkg && sudo -u builder updpkgsums )
+
+          # Regenerate .SRCINFO.
+          ( cd /tmp/pkg && sudo -u builder makepkg --printsrcinfo > .SRCINFO )
+
+          # Publish back into the checked-out repo.
+          cp /tmp/pkg/PKGBUILD /tmp/pkg/.SRCINFO .
+
+          echo "--- new PKGBUILD version ---"
+          grep -E '^(pkgver|pkgrel)=' PKGBUILD
+
+      - name: Push to AUR
+        if: steps.upstream.outputs.version != steps.current.outputs.version
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+          NEW: ${{ steps.upstream.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # SSH setup for AUR (deploy key from repository secrets).
+          install -d -m 700 /root/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > /root/.ssh/aur
+          chmod 600 /root/.ssh/aur
+          ssh-keyscan -H aur.archlinux.org >> /root/.ssh/known_hosts 2>/dev/null
+          printf 'Host aur.archlinux.org\n  IdentityFile /root/.ssh/aur\n  User aur\n  IdentitiesOnly yes\n' > /root/.ssh/config
+
+          # AUR has its own history -> clone and commit on top of it.
+          rm -rf /tmp/aur
+          git clone "ssh://aur@aur.archlinux.org/${AUR_PKG}.git" /tmp/aur
+
+          cp /tmp/pkg/PKGBUILD /tmp/pkg/.SRCINFO /tmp/aur/
+
+          cd /tmp/aur
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "No changes for AUR; skipping."
+            exit 0
+          fi
+          git -c user.name="${AUR_USERNAME}" -c user.email="${AUR_EMAIL}" \
+            commit -m "Update to v${NEW}"
+          git push origin "${AUR_BRANCH}"
+
+      - name: Commit to GitHub mirror
         if: steps.upstream.outputs.version != steps.current.outputs.version
         run: |
-          NEW="${{ steps.upstream.outputs.version }}"
-          # Update pkgver and reset pkgrel
-          sed -i "s/^pkgver=.*/pkgver=${NEW}/" PKGBUILD
-          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
-          # Update checksums and generate .SRCINFO
-          updpkgsums
-          makepkg --printsrcinfo > .SRCINFO
-
-      - name: Commit and push changes
-        if: steps.upstream.outputs.version != steps.current.outputs.version
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update to v${{ steps.upstream.outputs.version }}"
-          file_pattern: 'PKGBUILD .SRCINFO'
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          git config user.name  "${{ secrets.AUR_USERNAME }}"
+          git config user.email "${{ secrets.AUR_EMAIL }}"
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to v${{ steps.upstream.outputs.version }}"
+          git push
