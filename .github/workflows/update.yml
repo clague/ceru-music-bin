@@ -97,8 +97,12 @@ jobs:
 
           # SSH setup for AUR (deploy key from repository secrets).
           install -d -m 700 /root/.ssh
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > /root/.ssh/aur
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" | tr -d '\r' > /root/.ssh/aur
           chmod 600 /root/.ssh/aur
+          # Fail fast with a clear message if the secret is malformed.
+          ssh-keygen -y -f /root/.ssh/aur >/dev/null \
+            || { echo "::error::AUR_SSH_PRIVATE_KEY is not a valid unencrypted private key"; exit 1; }
+          echo "Deploy key fingerprint: $(ssh-keygen -lf /root/.ssh/aur)"
           ssh-keyscan -H aur.archlinux.org >> /root/.ssh/known_hosts 2>/dev/null
           printf 'Host aur.archlinux.org\n  IdentityFile /root/.ssh/aur\n  User aur\n  IdentitiesOnly yes\n' > /root/.ssh/config
 
