@@ -74,10 +74,10 @@ jobs:
           sed -i "s/^pkgrel=.*/pkgrel=1/"     /tmp/pkg/PKGBUILD
 
           # Recompute checksums (downloads the new upstream artifacts).
-          ( cd /tmp/pkg && sudo -u builder updpkgsums )
+          ( cd /tmp/pkg && sudo -H -u builder updpkgsums )
 
           # Regenerate .SRCINFO.
-          ( cd /tmp/pkg && sudo -u builder makepkg --printsrcinfo > .SRCINFO )
+          ( cd /tmp/pkg && sudo -H -u builder makepkg --printsrcinfo > .SRCINFO )
 
           # Publish back into the checked-out repo.
           cp /tmp/pkg/PKGBUILD /tmp/pkg/.SRCINFO .
