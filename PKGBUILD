@@ -1,7 +1,7 @@
 # Maintainer: Display-HDMI <wjr2009945@163.com>
 pkgname=ceru-music-bin
 pkgver=2.4.0
-pkgrel=2
+pkgrel=3
 pkgdesc='澜音 - 一款简洁优雅的跨平台音乐播放器，支持获取公开音乐信息和基于插件的播放功能。'
 arch=('x86_64')
 url='https://ceru.docs.shiqianjiang.cn/'
@@ -19,6 +19,7 @@ depends=(
     'libxtst'            # XI2 手势
     'xdg-utils'          # xdg-open / xdg-settings
 )
+makedepends=('cargo')    # 重编 external-media-integration 原生模块（修复 MPRIS）
 optdepends=('libayatana-appindicator: 托盘图标支持')
 provides=('ceru-music')
 conflicts=('ceru-music-appimage')
@@ -26,6 +27,14 @@ conflicts=('ceru-music-appimage')
 _appdir='/usr/lib/ceru-music'
 _debname="ceru-music-${pkgver}-linux-amd64.deb"
 _debdir='澜音'         # 上游 deb 内部目录名（中文）
+_debdir='澜音'
+
+# 上游 bug（MPRIS 永远超时）：native/external-media-integration/src/sys_media/
+# linux.rs 的 run_mpris_worker() 从不 await player.run()，mpris-server 0.10 的
+# object server 无人驱动，客户端任何方法调用即触发 local_server.rs 内部
+# unwrap(SendError) panic。本仓库 native/ 是上游开源源码 + 该缺口的修复
+# （select! 驱动 run()），构建后替换 deb 里的同名 .node。
+# 上游修复后（提了 issue）可移除本目录与 makedepends。
 
 source=("LICENSE::https://raw.githubusercontent.com/timeshiftsauce/CeruMusic/main/LICENSE")
 source_x86_64=("${_debname}::https://github.com/timeshiftsauce/CeruMusic/releases/download/v${pkgver}/${_debname}")
@@ -55,7 +64,17 @@ prepare() {
     #                      AppImageUpdater，因此不装
 }
 
+build() {
+    cp -a "${startdir}/native" "${srcdir}/native"
+    cd "${srcdir}/native"
+    cargo build --release --locked --target-dir "${srcdir}/native-build"
+}
+
 package() {
+    # 0. 用重编译的原生模块替换 deb 里的（修复 MPRIS 无 run() 的问题）
+    install -m755 "${srcdir}/native-build/release/libexternal_media_integration.so" \
+        "${srcdir}/debroot/opt/${_debdir}/resources/app.asar.unpacked/native/external-media-integration/external-media-integration.node"
+
     # 1. 应用代码（app.asar + 解包出来的原生模块 better-sqlite3、资源文件）
     install -d "${pkgdir}${_appdir}/resources"
     cp -a "${srcdir}/debroot/opt/${_debdir}/resources/app.asar" \
