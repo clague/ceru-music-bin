@@ -86,12 +86,10 @@ jobs:
           grep -E '^(pkgver|pkgrel)=' PKGBUILD
 
       - name: Push to AUR
-        if: steps.upstream.outputs.version != steps.current.outputs.version
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
           AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
-          NEW: ${{ steps.upstream.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -110,8 +108,12 @@ jobs:
           rm -rf /tmp/aur
           git clone "ssh://aur@aur.archlinux.org/${AUR_PKG}.git" /tmp/aur
 
-          cp /tmp/pkg/PKGBUILD /tmp/pkg/.SRCINFO /tmp/aur/
-
+          if [ -f /tmp/pkg/PKGBUILD ]; then
+            cp /tmp/pkg/PKGBUILD /tmp/pkg/.SRCINFO /tmp/aur/
+          else
+            cp PKGBUILD .SRCINFO /tmp/aur/
+          fi
+          # 版本未变时，pkgrel/补丁类改动也要能同步：与 AUR 现状做内容比对
           cd /tmp/aur
           git add PKGBUILD .SRCINFO
           if git diff --cached --quiet; then
@@ -119,7 +121,7 @@ jobs:
             exit 0
           fi
           git -c user.name="${AUR_USERNAME}" -c user.email="${AUR_EMAIL}" \
-            commit -m "Update to v${NEW}"
+            commit -m "Update to v$(grep -E '^pkgver=' PKGBUILD | head -n1 | cut -d= -f2)-$(grep -E '^pkgrel=' PKGBUILD | head -n1 | cut -d= -f2)"
           git push origin "${AUR_BRANCH}"
 
       - name: Commit to GitHub mirror
