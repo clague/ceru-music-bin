@@ -1,7 +1,7 @@
 # Maintainer: Display-HDMI <wjr2009945@163.com>
 pkgname=ceru-music-bin
 pkgver=2.4.0
-pkgrel=1
+pkgrel=2
 pkgdesc='澜音 - 一款简洁优雅的跨平台音乐播放器，支持获取公开音乐信息和基于插件的播放功能。'
 arch=('x86_64')
 url='https://ceru.docs.shiqianjiang.cn/'
@@ -62,6 +62,19 @@ package() {
         "${pkgdir}${_appdir}/resources/"
     cp -a "${srcdir}/debroot/opt/${_debdir}/resources/app.asar.unpacked" \
         "${pkgdir}${_appdir}/resources/"
+
+    # 1.5 MPRIS 原生模块的兼容链接：
+    # 应用内 external-media-integration（Linux 下提供 MPRIS，供 Caelestia/
+    # 其他桌面媒体中心识别）按 process.resourcesPath 解析路径。共用系统
+    # electron44 启动时 resourcesPath=/usr/lib/electron44/resources，而非
+    # 本包的 /usr/lib/ceru-music/resources，导致模块加载失败：
+    # 回退到浏览器 mediaSession，但应用又禁用了 Chromium 的
+    # MediaSessionService，结果 D-Bus 上无 MPRIS → 系统媒体中心无显示。
+    # 日志中应用首先尝试 ${resourcesPath}/app.asar.unpacked/native/...，
+    # 故在此建立符号链接指回本包的模块目录（electron44 不拥有这些路径，无冲突）。
+    install -d "${pkgdir}/usr/lib/electron44/resources/app.asar.unpacked/native"
+    ln -s "${_appdir}/resources/app.asar.unpacked/native/external-media-integration" \
+        "${pkgdir}/usr/lib/electron44/resources/app.asar.unpacked/native/external-media-integration"
 
     # 2. 启动脚本：用系统 electron 加载 app.asar
     #    启动前读取用户自定义参数文件（约定同 code-flags.conf / electron-flags.conf）：
